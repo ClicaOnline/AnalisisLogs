@@ -1,0 +1,148 @@
+﻿ANALIZADOR DE LOGS DE SERVIDOR PARA EXCEL
+=========================================
+
+Que hace
+--------
+Convierte logs de Apache/Nginx (formato "combined", el de Plesk: access_log,
+access_ssl_log, *.processed, *.gz) y el error_log de Apache/ModSecurity en CSVs
+que se abren con doble clic en Excel (separador ; y UTF-8, configuracion espanola).
+
+Objetivos:
+  1. Contar visitantes humanos por dia y hora para cuadrar con GA4.
+  2. Detectar scraping, bots falsos y abuso con una puntuacion 0-100 explicada.
+
+Requisitos: Windows 10/11. No hay que instalar nada (usa PowerShell de serie).
+
+
+Como se usa
+-----------
+1. Descarga los logs desde Plesk (Sitios web > Registros > descargar) o por FTP
+   desde /var/www/vhosts/<dominio>/logs/
+2. Mete los ficheros en una carpeta.
+3. Arrastra la carpeta (o los ficheros) encima de analizar_logs.bat
+4. Se crea una carpeta analisis_logs_AAAAMMDD_HHMMSS junto a los logs.
+
+Si los datos van a salir de la empresa o a compartirse, usa
+analizar_logs_seudonimizado.bat: las IPs se sustituyen por un hash (ip_xxxx,
+net_xxxx). La cardinalidad no cambia, pero los codigos cambian en cada ejecucion
+y no se pueden revertir.
+
+Notas sobre ficheros:
+  - Los .webstat se ignoran: son copia del log y duplicarian datos.
+  - Para un periodo completo hay que meter el log actual + los .processed
+    (y sus .gz rotados). Se procesan por fecha de modificacion.
+  - Cualquier fichero con "error" en el nombre se trata como error_log.
+
+Opciones por linea de comandos:
+  powershell -ExecutionPolicy Bypass -File analizar_logs.ps1 <rutas> [-Seudonimizar] [-SinDetalle] [-Salida <carpeta>]
+  -SinDetalle  no genera 01_peticiones.csv (mas rapido en logs enormes)
+
+Rendimiento orientativo: 5.000-6.000 lineas por segundo. 1 millon de lineas,
+unos 3-4 minutos. Si 01_peticiones supera 1.000.000 de filas se parte en
+varios ficheros (limite de Excel).
+
+
+Ficheros que genera
+-------------------
+00_resumen.txt           Resumen ejecutivo y top 10 sospechosos.
+01_peticiones.csv        Una fila por peticion, parseada. Base para tablas dinamicas.
+02_resumen_diario.csv    Cardinalidades por dia. EL FICHERO PARA COMPARAR CON GA4.
+03_resumen_horario.csv   Lo mismo por hora. Sirve para ver picos de scraping.
+04_visitantes.csv        Un visitante = IP + user agent. Ordenado por sospecha.
+05_ips.csv               Agregado por IP (detecta rotacion de user agent).
+06_subredes.csv          Agregado por /24 (detecta scraping distribuido).
+07_user_agents.csv       Inventario de user agents y bots identificados.
+08_errores_servidor.csv  error_log parseado: bloqueos WAF, reglas, URIs atacadas.
+
+
+Definiciones
+------------
+tipo_trafico
+  humano        UA de navegador real (Windows, Mac, Linux, iPhone, Android)
+  bot_buscador  Google, Bing, Yandex, DuckDuckGo, Apple...
+  bot_ia        GPTBot, ClaudeBot, PerplexityBot, CCBot, Bytespider, Amazonbot...
+  bot_seo       Ahrefs, Semrush, Majestic, Screaming Frog...
+  bot_social    previsualizaciones de Facebook, WhatsApp, LinkedIn...
+  servicio      Jetpack, WordPress cron, Plesk, monitores de uptime
+  herramienta   curl, python, Go, headless Chrome, escaneres, UA vacio
+  bot_otro      cualquier UA que se declara bot pero no esta en la lista
+
+tipo_recurso
+  pagina   GET con respuesta 2xx o 304 a una URL que no es fichero estatico ni
+           ruta tecnica de WordPress. Es lo equivalente a un page_view.
+  recurso  CSS, JS, imagenes, fuentes
+  otro     wp-admin, wp-json, xmlrpc, feeds, xml, txt, pdf, errores...
+
+visitantes_humanos          IP+UA de tipo humano con al menos una pagina ese dia.
+visitantes_humanos_limpios  Lo anterior quitando los de sospecha alta (>=60).
+pv_humanas_limpias          Paginas vistas de los visitantes limpios.
+
+
+Puntuacion de scraping (04_visitantes.csv)
+------------------------------------------
+Suma de senales, maximo 100. Alto >= 60, medio 30-59, bajo < 30.
+La columna "motivos" dice exactamente que senales han saltado.
+
+  +40  Dice ser Googlebot y la IP no es de Google
+  +40  Dice ser Jetpack/WordPress.com y la IP no es de Automattic
+  +30  UA de herramienta o script (curl, python, headless...)
+  +30  Su subred /24 tiene >=10 IPs pidiendo paginas sin cargar recursos
+  +20/30  10 o 30 paginas en un mismo minuto
+  +15/25  100 o 500 paginas en el periodo
+  +25  UA de navegador con >=10 paginas y ningun CSS/JS/imagen
+  +15  UA de navegador que carga menos de 1 recurso cada 2 paginas
+  +10  UA de navegador con >=10 paginas y nunca envia referer
+  +15  UA de navegador que pide robots.txt
+  +20  10 o mas 404 y al menos el 30% de sus peticiones
+  +15/25  1 o 5 accesos a rutas sensibles (wp-login, xmlrpc, .env, .git...)
+  +20  La IP tiene bloqueos del WAF en el error_log
+  +20  La IP usa 5 o mas user agents distintos
+
+Es una heuristica para priorizar, no una sentencia. Revisa siempre los motivos.
+
+
+Como cuadrar con GA4
+--------------------
+Compara 02_resumen_diario.csv (visitantes_humanos_limpios, pv_humanas_limpias)
+con GA4 > Exploracion libre, dimension Fecha, metricas Usuarios activos y Vistas.
+Usa siempre la misma granularidad (dia contra dia); la suma de visitantes diarios
+no es igual a los visitantes del periodo, ni en los logs ni en GA4.
+
+Diferencias esperables, y por que:
+  - Consentimiento: sin aceptar cookies GA4 no mide o modela (Consent Mode).
+    El log ve a todo el mundo. Es la principal fuente de diferencia.
+  - Bloqueadores de anuncios y navegadores con proteccion (Brave, Safari ITP)
+    bloquean GA4 pero no el servidor.
+  - Bots que ejecutan JavaScript entran en GA4; bots que no lo ejecutan solo
+    salen en el log.
+  - IP+UA no es una persona: una oficina o una red movil (CGNAT) comparte IP;
+    una misma persona en movil y wifi cuenta doble. GA4 cuenta cookies.
+  - Cache y CDN: si hay Cloudflare u otra CDN delante, el servidor no ve las
+    paginas servidas desde cache y la IP puede ser la de la CDN. En ese caso
+    estos numeros no sirven sin los logs de la CDN.
+  - Si los CSS/JS/imagenes se sirven desde CDN, la senal "no descarga recursos"
+    da falsos positivos. Comprueba que recursos aparecen en 01_peticiones.
+  - Zona horaria: el log va en la hora del servidor (mira el +0100 de cada
+    linea). Comprueba que la propiedad de GA4 usa la misma.
+
+Lectura del ratio GA4 / log humano limpio: lo normal es que GA4 quede por
+debajo, y la distancia depende sobre todo de la tasa de aceptacion del banner.
+Por encima de 1 indica que GA4 recibe trafico que el servidor no ve (cache/CDN)
+o hits duplicados. Conviene fijar el ratio de cada cliente como referencia y
+vigilar cambios bruscos.
+
+
+Analisis rapidos en Excel
+-------------------------
+- Scrapers: abrir 04_visitantes, filtrar nivel_sospecha = alto. Ya va ordenado.
+- Picos: 03_resumen_horario, grafico de lineas con peticiones y pv_humanas.
+  Un pico de peticiones sin subida de pv_humanas es trafico automatico.
+- Que se llevan: tabla dinamica sobre 01_peticiones, filtro visitante_id del
+  sospechoso, filas = ruta.
+- Bots de IA: 07_user_agents filtrado por tipo_trafico = bot_ia.
+- Ataques: tabla dinamica sobre 08_errores_servidor, filas = mensaje, valores =
+  recuento de ip.
+
+Proteccion de datos: las IPs son dato personal (RGPD). Trabaja con la version
+seudonimizada salvo que necesites las IPs para bloquearlas, y borra los
+resultados cuando termines.
